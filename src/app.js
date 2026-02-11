@@ -36,17 +36,6 @@ app.use('/loans', loansRoutes);
 app.use('/admin', loansAdminRoutes);
 app.use('/uploads', express.static('uploads'));
 
-// Servir build de React
-app.use(express.static(path.join(__dirname, "dist")));
-
-// SPA fallback
-app.get('*', (req, res) => {
-  if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
-    return res.status(404).json({ ok: false, message: 'Not found' });
-  }
-  res.sendFile(path.join(__dirname, "dist", "index.html"));
-});
-
 app.use((err, req, res, next) => {
   console.error(err);
   const status = err.status || 500;
