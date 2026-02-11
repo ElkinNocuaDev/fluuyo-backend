@@ -36,11 +36,14 @@ app.use('/loans', loansRoutes);
 app.use('/admin', loansAdminRoutes);
 app.use('/uploads', express.static('uploads'));
 
-// Carpeta donde está tu build de Vite
+// Servir build de React
 app.use(express.static(path.join(__dirname, "dist")));
 
-// SPA fallback: cualquier ruta que no exista se envía al index.html
-app.get('/*', (req, res) => {
+// SPA fallback
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api') || req.path.startsWith('/uploads')) {
+    return res.status(404).json({ ok: false, message: 'Not found' });
+  }
   res.sendFile(path.join(__dirname, "dist", "index.html"));
 });
 
