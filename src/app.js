@@ -36,6 +36,15 @@ app.use('/loans', loansRoutes);
 app.use('/admin', loansAdminRoutes);
 app.use('/uploads', express.static('uploads'));
 
+// Servir build de React
+const buildPath = path.join(__dirname, 'build');
+app.use(express.static(buildPath));
+
+// SPA fallback: cualquier ruta que no sea API -> index.html
+app.get('*', (req, res) => {
+  res.sendFile(path.join(buildPath, 'index.html'));
+});
+
 app.use((err, req, res, next) => {
   console.error(err);
   const status = err.status || 500;
