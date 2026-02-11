@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
+const db = require('../db');
 
-function requireAuth(req, res, next) {
+async function requireAuth(req, res, next) {
   const auth = req.headers.authorization || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
 
@@ -14,7 +15,19 @@ function requireAuth(req, res, next) {
   try {
     const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
 
-    if (!payload.email_verified) {
+    // 🔎 Buscar usuario real en BD
+    const user = await db.user.findUnique({
+      where: { id: payload.sub },
+    });
+
+    if (!user) {
+      const e = new Error('Usuario no encontrado.');
+      e.status = 401;
+      e.code = 'USER_NOT_FOUND';
+      return next(e);
+    }
+
+    if (!user.email_verified) {
       const e = new Error('Correo no verificado.');
       e.status = 403;
       e.code = 'EMAIL_NOT_VERIFIED';
@@ -22,9 +35,9 @@ function requireAuth(req, res, next) {
     }
 
     req.user = {
-      id: payload.sub,
-      role: payload.role,
-      email_verified: payload.email_verified,
+      id: user.id,
+      role: user.role,
+      email_verified: user.email_verified,
     };
 
     next();

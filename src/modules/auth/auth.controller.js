@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const { z } = require('zod');
 const { pool } = require('../../db');
 const { writeAuditLog } = require('../audit/audit.service');
+const { generateEmailVerificationToken } = require('./emailTokens');
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -19,7 +20,11 @@ const loginSchema = z.object({
 
 function signAccessToken(user) {
   return jwt.sign(
-    { sub: user.id, role: user.role },
+    {
+      sub: user.id,
+      role: user.role,
+      email_verified: user.email_verified, // 👈 agregar esto
+    },
     process.env.JWT_ACCESS_SECRET,
     { expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m' }
   );
@@ -115,7 +120,7 @@ async function login(req, res, next) {
 
     const result = await pool.query(
       `
-      SELECT id, email, password_hash, role, status, kyc_status
+      SELECT id, email, password_hash, role, status, kyc_status, email_verified
       FROM users
       WHERE email = $1 AND deleted_at IS NULL
       `,
