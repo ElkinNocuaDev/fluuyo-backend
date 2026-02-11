@@ -40,7 +40,7 @@ app.use('/uploads', express.static('uploads'));
 app.use(express.static(path.join(__dirname, "dist")));
 
 // SPA fallback: cualquier ruta que no exista se envía al index.html
-app.get("*", (req, res) => {
+app.get('/*', (req, res) => {
   res.sendFile(path.join(__dirname, "dist", "index.html"));
 });
 
