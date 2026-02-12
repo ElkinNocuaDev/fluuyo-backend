@@ -54,7 +54,7 @@ async function register(req, res, next) {
         email_verification_expires,
         status
       )
-      VALUES ($1, $2, $3, $4, $5, false, $6, $7, 'PENDING')
+      VALUES ($1, $2, $3, $4, $5, false, $6, $7, 'ACTIVE')
       RETURNING id, email, phone, role, status, kyc_status, created_at
       `,
       [
