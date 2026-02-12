@@ -4,7 +4,7 @@ const { z } = require('zod');
 const { pool } = require('../../db');
 const { writeAuditLog } = require('../audit/audit.service');
 const { generateEmailVerificationToken } = require('./emailTokens');
-const { sendVerificationEmail } = require('../email/email.service');
+const { sendVerificationEmail } = require('../notifications/email.service');
 
 const registerSchema = z.object({
   email: z.string().email(),
