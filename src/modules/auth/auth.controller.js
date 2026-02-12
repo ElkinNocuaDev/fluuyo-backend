@@ -4,6 +4,7 @@ const { z } = require('zod');
 const { pool } = require('../../db');
 const { writeAuditLog } = require('../audit/audit.service');
 const { generateEmailVerificationToken } = require('./emailTokens');
+const { sendVerificationEmail } = require('../email/email.service');
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -54,7 +55,7 @@ async function register(req, res, next) {
         email_verification_expires,
         status
       )
-      VALUES ($1, $2, $3, $4, $5, false, $6, $7, 'ACTIVE')
+      VALUES ($1, $2, $3, $4, $5, false, $6, $7, 'BLOCKED')
       RETURNING id, email, phone, role, status, kyc_status, created_at
       `,
       [
@@ -92,7 +93,7 @@ async function register(req, res, next) {
     });
 
     // (opcional pero recomendado)
-    // await sendVerificationEmail({ to: user.email, token: emailToken });
+    await sendVerificationEmail({ to: user.email, token: emailToken });
 
     const token = signAccessToken(user);
 
@@ -232,4 +233,61 @@ async function verifyEmail(req, res, next) {
   }
 }
 
-module.exports = { register, login, verifyEmail };
+async function resendVerification(req, res, next) {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: { code: 'EMAIL_REQUIRED', message: 'Email requerido.' }
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT id, email, email_verified
+      FROM users
+      WHERE email = $1 AND deleted_at IS NULL
+      `,
+      [email]
+    );
+
+    const user = result.rows[0];
+
+    // 🔒 No revelar si el usuario existe
+    if (!user) {
+      return res.json({ ok: true });
+    }
+
+    if (user.email_verified) {
+      return res.json({ ok: true });
+    }
+
+    // Generar nuevo token
+    const { token, expires } = generateEmailVerificationToken();
+
+    await pool.query(
+      `
+      UPDATE users
+      SET email_verification_token = $1,
+          email_verification_expires = $2,
+          updated_at = NOW()
+      WHERE id = $3
+      `,
+      [token, expires, user.id]
+    );
+
+    await sendVerificationEmail({
+      to: user.email,
+      token
+    });
+
+    res.json({ ok: true });
+
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { register, login, verifyEmail, resendVerification };
