@@ -19,6 +19,7 @@ const loginSchema = z.object({
 });
 
 function signAccessToken(user) {
+  console.log('SIGN SECRET:', process.env.JWT_ACCESS_SECRET);
   return jwt.sign(
     {
       sub: user.id,
@@ -144,7 +145,6 @@ async function login(req, res, next) {
 
     const ok = await bcrypt.compare(data.password, user.password_hash);
     if (!ok) {
-      console.log('LOGIN SECRET:', process.env.JWT_ACCESS_SECRET);
       const e = new Error('Credenciales inválidas.');
       e.status = 401;
       e.code = 'INVALID_CREDENTIALS';
@@ -172,7 +172,6 @@ async function login(req, res, next) {
       user: { id: user.id, email: user.email, role: user.role, status: user.status, kyc_status: user.kyc_status },
     });
   } catch (err) {
-    console.log('LOGIN SECRET:', process.env.JWT_ACCESS_SECRET);
     if (err?.name === 'ZodError') {
       err.status = 400;
       err.code = 'VALIDATION_ERROR';
