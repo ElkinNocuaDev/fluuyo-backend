@@ -2,19 +2,34 @@ const jwt = require('jsonwebtoken');
 const db = require('../db');
 
 async function requireAuth(req, res, next) {
-  const auth = req.headers.authorization || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-
-  if (!token) {
-    const e = new Error('Falta token de autenticación.');
-    e.status = 401;
-    e.code = 'NO_TOKEN';
-    return next(e);
-  }
-
   try {
-    console.log('VERIFY SECRET:', process.env.JWT_ACCESS_SECRET);
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      const e = new Error('Falta token de autenticación.');
+      e.status = 401;
+      e.code = 'NO_TOKEN';
+      return next(e);
+    }
+
+    const token = authHeader.split(' ')[1];
+
+    if (!token) {
+      const e = new Error('Token malformado.');
+      e.status = 401;
+      e.code = 'INVALID_TOKEN';
+      return next(e);
+    }
+
+    // 🔐 Verificar firma y expiración
     const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+
+    if (!payload?.sub) {
+      const e = new Error('Token inválido (sin subject).');
+      e.status = 401;
+      e.code = 'INVALID_TOKEN';
+      return next(e);
+    }
 
     // 🔎 Buscar usuario real en BD
     const user = await db.user.findUnique({
@@ -35,6 +50,14 @@ async function requireAuth(req, res, next) {
       return next(e);
     }
 
+    if (user.status !== 'ACTIVE') {
+      const e = new Error('Usuario inactivo o bloqueado.');
+      e.status = 403;
+      e.code = 'USER_BLOCKED';
+      return next(e);
+    }
+
+    // Normalizamos la estructura
     req.user = {
       id: user.id,
       role: user.role,
@@ -42,11 +65,23 @@ async function requireAuth(req, res, next) {
     };
 
     next();
-  } catch {
-    const e = new Error('Token inválido o expirado.');
-    e.status = 401;
-    e.code = 'INVALID_TOKEN';
-    next(e);
+  } catch (err) {
+    // Manejo explícito de JWT
+    if (err.name === 'TokenExpiredError') {
+      const e = new Error('Token expirado.');
+      e.status = 401;
+      e.code = 'TOKEN_EXPIRED';
+      return next(e);
+    }
+
+    if (err.name === 'JsonWebTokenError') {
+      const e = new Error('Token inválido.');
+      e.status = 401;
+      e.code = 'INVALID_TOKEN';
+      return next(e);
+    }
+
+    next(err); // otros errores reales
   }
 }
 
