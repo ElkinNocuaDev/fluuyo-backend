@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const db = require('../db');
+const { pool } = require('../db');
 
 async function requireAuth(req, res, next) {
   try {
@@ -14,27 +14,26 @@ async function requireAuth(req, res, next) {
 
     const token = authHeader.split(' ')[1];
 
-    if (!token) {
-      const e = new Error('Token malformado.');
-      e.status = 401;
-      e.code = 'INVALID_TOKEN';
-      return next(e);
-    }
-
-    // 🔐 Verificar firma y expiración
     const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
 
     if (!payload?.sub) {
-      const e = new Error('Token inválido (sin subject).');
+      const e = new Error('Token inválido.');
       e.status = 401;
       e.code = 'INVALID_TOKEN';
       return next(e);
     }
 
-    // 🔎 Buscar usuario real en BD
-    const user = await db.user.findUnique({
-      where: { id: payload.sub },
-    });
+    // 🔎 Buscar usuario en PostgreSQL
+    const result = await pool.query(
+      `
+      SELECT id, role, email_verified, status
+      FROM users
+      WHERE id = $1 AND deleted_at IS NULL
+      `,
+      [payload.sub]
+    );
+
+    const user = result.rows[0];
 
     if (!user) {
       const e = new Error('Usuario no encontrado.');
@@ -57,7 +56,6 @@ async function requireAuth(req, res, next) {
       return next(e);
     }
 
-    // Normalizamos la estructura
     req.user = {
       id: user.id,
       role: user.role,
@@ -66,22 +64,19 @@ async function requireAuth(req, res, next) {
 
     next();
   } catch (err) {
-    // Manejo explícito de JWT
     if (err.name === 'TokenExpiredError') {
-      const e = new Error('Token expirado.');
-      e.status = 401;
-      e.code = 'TOKEN_EXPIRED';
-      return next(e);
+      err.status = 401;
+      err.code = 'TOKEN_EXPIRED';
+      return next(err);
     }
 
     if (err.name === 'JsonWebTokenError') {
-      const e = new Error('Token inválido.');
-      e.status = 401;
-      e.code = 'INVALID_TOKEN';
-      return next(e);
+      err.status = 401;
+      err.code = 'INVALID_TOKEN';
+      return next(err);
     }
 
-    next(err); // otros errores reales
+    next(err);
   }
 }
 
