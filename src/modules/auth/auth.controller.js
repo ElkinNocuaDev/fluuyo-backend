@@ -186,11 +186,13 @@ async function login(req, res, next) {
 
 async function verifyEmail(req, res, next) {
   try {
-    const { token } = req.body;
+    // 🔹 Aceptar token por query (link email) o body (POST)
+    const token = req.body?.token || req.query?.token;
 
     if (!token) {
       const e = new Error('Token requerido');
       e.status = 400;
+      e.code = 'TOKEN_REQUIRED';
       throw e;
     }
 
@@ -228,10 +230,12 @@ async function verifyEmail(req, res, next) {
     });
 
     res.json({ ok: true });
+
   } catch (err) {
     next(err);
   }
 }
+
 
 async function resendVerification(req, res, next) {
   try {
