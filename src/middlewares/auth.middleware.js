@@ -13,6 +13,7 @@ async function requireAuth(req, res, next) {
   }
 
   try {
+    console.log('VERIFY SECRET:', process.env.JWT_ACCESS_SECRET);
     const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
 
     // 🔎 Buscar usuario real en BD
