@@ -28,7 +28,7 @@ async function sendVerificationEmail({ to, token }) {
                 <!-- Logo -->
                 <tr>
                   <td align="center">
-                    <img src="https://app.fluuyo.com/fluuyo-logo-web-outlines.svg" 
+                    <img src="https://app.fluuyo.com/fluuyo-logo.svg" 
                          alt="Fluyoo"
                          width="150"
                          style="display:block;margin-bottom:30px;" />
