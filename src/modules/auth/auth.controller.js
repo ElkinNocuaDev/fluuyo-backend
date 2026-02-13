@@ -1,5 +1,6 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const crypto = require("crypto");
 const { z } = require('zod');
 const { pool } = require('../../db');
 const { writeAuditLog } = require('../audit/audit.service');
@@ -17,6 +18,15 @@ const registerSchema = z.object({
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
+});
+
+const forgotPasswordSchema = z.object({
+  email: z.string().email(),
+});
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(10),
+  password: z.string().min(8),
 });
 
 function signAccessToken(user) {
@@ -294,4 +304,133 @@ async function resendVerification(req, res, next) {
   }
 }
 
-module.exports = { register, login, verifyEmail, resendVerification };
+async function forgotPassword(req, res, next) {
+  try {
+    const { email } = forgotPasswordSchema.parse(req.body);
+
+    const result = await pool.query(
+      `
+      SELECT id, email
+      FROM users
+      WHERE email = $1 AND deleted_at IS NULL
+      `,
+      [email]
+    );
+
+    const user = result.rows[0];
+
+    // Generar siempre token (reduce diferencias de timing)
+    const rawToken = crypto.randomBytes(32).toString('hex');
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(rawToken)
+      .digest('hex');
+
+    const expires = new Date(Date.now() + 30 * 60 * 1000);
+
+    if (user) {
+      await pool.query(
+        `
+        UPDATE users
+        SET reset_password_token = $1,
+            reset_password_expires = $2,
+            updated_at = NOW()
+        WHERE id = $3
+        `,
+        [hashedToken, expires, user.id]
+      );
+
+      await sendResetPasswordEmail({
+        to: user.email,
+        token: rawToken,
+      });
+
+      await writeAuditLog({
+        actorUserId: user.id,
+        action: 'AUTH_FORGOT_PASSWORD',
+        entityType: 'user',
+        entityId: user.id,
+        before: null,
+        after: null,
+        ip: req.ip,
+        userAgent: req.headers['user-agent'] || null,
+      });
+    }
+
+    // 🔒 Siempre responder igual
+    return res.json({ ok: true });
+
+  } catch (err) {
+    if (err?.name === 'ZodError') {
+      err.status = 400;
+      err.code = 'VALIDATION_ERROR';
+      err.message = 'Datos inválidos.';
+      err.details = err.issues;
+      return next(err);
+    }
+    next(err);
+  }
+}
+
+async function resetPassword(req, res, next) {
+  try {
+    const { token, password } = resetPasswordSchema.parse(req.body);
+
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(token)
+      .digest('hex');
+
+    const saltRounds = Number(process.env.BCRYPT_SALT_ROUNDS || 12);
+    const passwordHash = await bcrypt.hash(password, saltRounds);
+
+    const result = await pool.query(
+      `
+      UPDATE users
+      SET password_hash = $1,
+          reset_password_token = NULL,
+          reset_password_expires = NULL,
+          updated_at = NOW()
+      WHERE reset_password_token = $2
+        AND reset_password_expires > NOW()
+      RETURNING id
+      `,
+      [passwordHash, hashedToken]
+    );
+
+    const user = result.rows[0];
+
+    if (!user) {
+      const e = new Error('Token inválido o expirado.');
+      e.status = 400;
+      e.code = 'INVALID_TOKEN';
+      throw e;
+    }
+
+    await writeAuditLog({
+      actorUserId: user.id,
+      action: 'AUTH_RESET_PASSWORD',
+      entityType: 'user',
+      entityId: user.id,
+      before: null,
+      after: null,
+      ip: req.ip,
+      userAgent: req.headers['user-agent'] || null,
+    });
+
+    res.json({ ok: true });
+
+  } catch (err) {
+    if (err?.name === 'ZodError') {
+      err.status = 400;
+      err.code = 'VALIDATION_ERROR';
+      err.message = 'Datos inválidos.';
+      err.details = err.issues;
+      return next(err);
+    }
+    next(err);
+  }
+}
+
+
+module.exports = { register, login, verifyEmail, resendVerification, forgotPassword, resetPassword };
