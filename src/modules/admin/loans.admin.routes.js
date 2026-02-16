@@ -67,74 +67,119 @@ router.patch('/loans/:id/approve', requireAuth, requireRole('ADMIN', 'OPERATOR')
 });
 
 // PATCH /admin/loans/:id/disburse
-router.patch('/loans/:id/disburse', requireAuth, requireRole('ADMIN', 'OPERATOR'), async (req, res, next) => {
-  try {
+router.patch(
+  '/loans/:id/disburse',
+  requireAuth,
+  requireRole('ADMIN'),
+  async (req, res, next) => {
     const { id } = req.params;
-    const { reference } = req.body || {};
 
-    await pool.query('BEGIN');
+    const client = await pool.connect();
 
-    const beforeR = await pool.query(`SELECT * FROM loans WHERE id = $1 FOR UPDATE`, [id]);
-    const before = beforeR.rows[0];
-    if (!before) {
-      const e = new Error('Préstamo no encontrado.');
-      e.status = 404; e.code = 'NOT_FOUND';
-      throw e;
-    }
+    try {
+      await client.query('BEGIN');
 
-    if (before.status !== 'APPROVED') {
-      const e = new Error('Solo se puede desembolsar un préstamo en estado APPROVED.');
-      e.status = 409; e.code = 'INVALID_STATE';
-      throw e;
-    }
+      // 1️⃣ Lock del préstamo (entidad principal)
+      const loanR = await client.query(
+        `
+        SELECT id, status, disbursed_at, principal_cop
+        FROM loans
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [id]
+      );
 
-    if (before.disbursed_at) {
-      const e = new Error('Este préstamo ya fue desembolsado.');
-      e.status = 409; e.code = 'ALREADY_DISBURSED';
-      throw e;
-    }
+      if (loanR.rowCount === 0) {
+        const e = new Error('Préstamo no encontrado.');
+        e.status = 404;
+        throw e;
+      }
 
-    const upR = await pool.query(
-      `
-      UPDATE loans
-      SET status = 'DISBURSED',
+      const loan = loanR.rows[0];
+
+      // 2️⃣ Validar estado correcto
+      if (loan.status !== 'APPROVED') {
+        const e = new Error(
+          'Solo se puede desembolsar un préstamo en estado APPROVED.'
+        );
+        e.status = 409;
+        e.code = 'INVALID_LOAN_STATUS';
+        throw e;
+      }
+
+      if (loan.disbursed_at) {
+        const e = new Error('El préstamo ya fue desembolsado.');
+        e.status = 409;
+        e.code = 'ALREADY_DISBURSED';
+        throw e;
+      }
+
+      // 3️⃣ Lock cuenta bancaria verificada
+      const accR = await client.query(
+        `
+        SELECT id
+        FROM loan_disbursement_accounts
+        WHERE loan_id = $1
+        AND is_verified = TRUE
+        FOR UPDATE
+        `,
+        [id]
+      );
+
+      if (accR.rowCount === 0) {
+        const e = new Error(
+          'No existe cuenta bancaria verificada para este préstamo.'
+        );
+        e.status = 409;
+        e.code = 'NO_VERIFIED_DISBURSEMENT_ACCOUNT';
+        throw e;
+      }
+
+      // 4️⃣ Actualizar préstamo
+      await client.query(
+        `
+        UPDATE loans
+        SET
+          status = 'DISBURSED',
           disbursed_at = NOW(),
           updated_at = NOW()
-      WHERE id = $1
-      RETURNING *
-      `,
-      [id]
-    );
+        WHERE id = $1
+        `,
+        [id]
+      );
 
-    const loan = upR.rows[0];
+      // 5️⃣ Registrar transacción contable
+      await client.query(
+        `
+        INSERT INTO loan_transactions (
+          loan_id,
+          type,
+          amount_cop
+        )
+        VALUES ($1, 'DISBURSEMENT', $2)
+        `,
+        [loan.id, loan.principal_cop]
+      );
 
-    await pool.query(
-      `
-      INSERT INTO transactions (loan_id, type, amount_cop, reference, created_by)
-      VALUES ($1, 'DISBURSEMENT', $2, $3, $4)
-      `,
-      [loan.id, loan.principal_cop, reference || null, req.user.id]
-    );
+      await client.query('COMMIT');
 
-    await writeAuditLog({
-      actorUserId: req.user.id,
-      action: 'LOAN_DISBURSED',
-      entityType: 'loan',
-      entityId: id,
-      before,
-      after: { status: loan.status, disbursed_at: loan.disbursed_at },
-      ip: req.ip,
-      userAgent: req.headers['user-agent'] || null,
-    });
+      res.json({
+        ok: true,
+        loan_id: loan.id,
+        status: 'DISBURSED'
+      });
 
-    await pool.query('COMMIT');
-
-    res.json({ ok: true, loan });
-  } catch (err) {
-    try { await pool.query('ROLLBACK'); } catch (_) {}
-    next(err);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      next(err);
+    } finally {
+      client.release();
+    }
   }
-});
+);
+
+
 
 router.get('/loan-payments', requireAuth, requireRole('ADMIN', 'OPERATOR'), async (req, res, next) => {
   try {
@@ -717,29 +762,28 @@ router.get(
       const l = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100);
       const offset = (p - 1) * l;
 
-      const filters = [];
-      const values = [];
-      let idx = 1;
+      const params = [];
+      let where = '';
 
       if (status) {
-        filters.push(`l.status = $${idx}`);
-        values.push(status);
-        idx++;
+        params.push(status);
+        where = `WHERE l.status = $1`;
       }
 
-      const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
-
-      // Total para paginación
+      // COUNT
       const countR = await pool.query(
         `
         SELECT COUNT(*)::int AS total
         FROM loans l
         ${where}
         `,
-        values
+        params
       );
 
-      // Data
+      // Agregamos limit y offset como parámetros
+      params.push(l);
+      params.push(offset);
+
       const rowsR = await pool.query(
         `
         SELECT
@@ -754,9 +798,10 @@ router.get(
         JOIN users u ON u.id = l.user_id
         ${where}
         ORDER BY l.created_at DESC
-        LIMIT $${idx} OFFSET $${idx + 1}
+        LIMIT $${params.length - 1}
+        OFFSET $${params.length}
         `,
-        [...values, l, offset]
+        params
       );
 
       res.json({
@@ -773,6 +818,7 @@ router.get(
 );
 
 
+
 // GET /admin/loans/:id
 router.get(
   '/loans/:id',
@@ -782,7 +828,7 @@ router.get(
     try {
       const { id } = req.params;
 
-      // Préstamo + usuario
+      // 1️⃣ Préstamo + usuario
       const loanR = await pool.query(
         `
         SELECT
@@ -804,7 +850,28 @@ router.get(
         throw e;
       }
 
-      // Cuotas
+      // 2️⃣ Cuenta bancaria de desembolso
+      const accountR = await pool.query(
+        `
+        SELECT
+          id,
+          account_holder_name,
+          account_holder_document,
+          bank_name,
+          account_type,
+          account_number,
+          is_verified,
+          created_at,
+          updated_at
+        FROM loan_disbursement_accounts
+        WHERE loan_id = $1
+        `,
+        [id]
+      );
+
+      const disbursementAccount = accountR.rows[0] || null;
+
+      // 3️⃣ Cuotas
       const installmentsR = await pool.query(
         `
         SELECT
@@ -822,7 +889,7 @@ router.get(
         [id]
       );
 
-      // Pagos
+      // 4️⃣ Pagos
       const paymentsR = await pool.query(
         `
         SELECT
@@ -842,14 +909,17 @@ router.get(
       res.json({
         ok: true,
         loan,
+        disbursement_account: disbursementAccount,
         installments: installmentsR.rows,
         payments: paymentsR.rows
       });
+
     } catch (err) {
       next(err);
     }
   }
 );
+
 
 // GET /admin/loans/:id/payments
 router.get(
@@ -886,7 +956,111 @@ router.get(
   }
 );
 
+router.patch(
+  '/loans/:id/verify-disbursement-account',
+  requireAuth,
+  requireRole('ADMIN'),
+  async (req, res, next) => {
+    const { id } = req.params;
 
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      // 1️⃣ Validar préstamo
+      const loanR = await client.query(
+        `
+        SELECT id, status, disbursed_at
+        FROM loans
+        WHERE id = $1
+        FOR UPDATE
+        `,
+        [id]
+      );
+
+      if (loanR.rowCount === 0) {
+        const e = new Error('Préstamo no encontrado.');
+        e.status = 404;
+        throw e;
+      }
+
+      const loan = loanR.rows[0];
+
+      if (loan.status !== 'APPROVED') {
+        const e = new Error(
+          'Solo se puede verificar cuenta cuando el préstamo está APPROVED.'
+        );
+        e.status = 409;
+        e.code = 'INVALID_LOAN_STATUS';
+        throw e;
+      }
+
+      if (loan.disbursed_at) {
+        const e = new Error(
+          'No se puede verificar cuenta después del desembolso.'
+        );
+        e.status = 409;
+        throw e;
+      }
+
+      // 2️⃣ Verificar que exista cuenta
+      const accR = await client.query(
+        `
+        SELECT id, is_verified
+        FROM loan_disbursement_accounts
+        WHERE loan_id = $1
+        FOR UPDATE
+        `,
+        [id]
+      );
+
+      if (accR.rowCount === 0) {
+        const e = new Error(
+          'No existe cuenta bancaria registrada para este préstamo.'
+        );
+        e.status = 409;
+        e.code = 'NO_DISBURSEMENT_ACCOUNT';
+        throw e;
+      }
+
+      const account = accR.rows[0];
+
+      // 3️⃣ Si ya está verificada → idempotente
+      if (account.is_verified) {
+        await client.query('COMMIT');
+        return res.json({
+          ok: true,
+          already_verified: true
+        });
+      }
+
+      // 4️⃣ Marcar como verificada
+      await client.query(
+        `
+        UPDATE loan_disbursement_accounts
+        SET is_verified = TRUE,
+            updated_at = NOW()
+        WHERE loan_id = $1
+        `,
+        [id]
+      );
+
+      await client.query('COMMIT');
+
+      res.json({
+        ok: true,
+        verified: true
+      });
+
+    } catch (err) {
+      await client.query('ROLLBACK');
+      next(err);
+    } finally {
+      client.release();
+    }
+  }
+);
 
 
 module.exports = router;

@@ -266,7 +266,6 @@ router.post('/:id/payments', requireAuth, upload.single('file'), async (req, res
 // --- GET /loans/active
 router.get('/active', requireAuth, async (req, res, next) => {
   try {
-    // Préstamo activo = PENDING/APPROVED/DISBURSED (misma regla que en apply)
     const loanR = await pool.query(
       `
       SELECT *
@@ -280,10 +279,17 @@ router.get('/active', requireAuth, async (req, res, next) => {
     );
 
     const loan = loanR.rows[0];
+
     if (!loan) {
-      return res.json({ ok: true, loan: null, installments: [] });
+      return res.json({
+        ok: true,
+        loan: null,
+        installments: [],
+        disbursement_account: null,
+      });
     }
 
+    // Cuotas
     const instR = await pool.query(
       `
       SELECT id, installment_number, due_date, amount_due_cop, amount_paid_cop, status
@@ -294,11 +300,38 @@ router.get('/active', requireAuth, async (req, res, next) => {
       [loan.id]
     );
 
-    res.json({ ok: true, loan, installments: instR.rows });
+    // Cuenta de desembolso
+    const accR = await pool.query(
+      `
+      SELECT
+        id,
+        account_holder_name,
+        account_holder_document,
+        bank_name,
+        account_type,
+        account_number,
+        is_verified,
+        created_at
+      FROM loan_disbursement_accounts
+      WHERE loan_id = $1
+      LIMIT 1
+      `,
+      [loan.id]
+    );
+
+    const disbursementAccount = accR.rows[0] || null;
+
+    res.json({
+      ok: true,
+      loan,
+      installments: instR.rows,
+      disbursement_account: disbursementAccount,
+    });
   } catch (err) {
     next(err);
   }
 });
+
 
 // --- GET /loans/my?limit=10
 router.get('/my', requireAuth, async (req, res, next) => {
@@ -358,6 +391,133 @@ router.get('/:id', requireAuth, async (req, res, next) => {
     res.json({ ok: true, loan, installments: instR.rows });
   } catch (err) {
     next(err);
+  }
+});
+
+
+const disbursementSchema = z.object({
+  bank_name: z.string().min(2).max(120),
+  account_type: z.enum(['SAVINGS', 'CHECKING']),
+  account_number: z.string().min(5).max(50),
+  account_holder_name: z.string().min(3).max(120),
+  account_holder_document: z.string().min(5).max(30),
+});
+
+router.post('/:id/disbursement-account', requireAuth, async (req, res, next) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+
+  const client = await pool.connect();
+
+  try {
+    const data = disbursementSchema.parse(req.body);
+
+    await client.query('BEGIN');
+
+    const loanR = await client.query(
+      `
+      SELECT id, user_id, status, disbursed_at
+      FROM loans
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [id]
+    );
+
+    if (loanR.rowCount === 0) {
+      const e = new Error('Préstamo no encontrado.');
+      e.status = 404;
+      throw e;
+    }
+
+    const loan = loanR.rows[0];
+
+    if (loan.user_id !== userId) {
+      const e = new Error('No autorizado.');
+      e.status = 403;
+      throw e;
+    }
+
+    if (loan.status !== 'APPROVED') {
+      const e = new Error('Solo permitido cuando el préstamo está APPROVED.');
+      e.status = 409;
+      e.code = 'INVALID_LOAN_STATUS';
+      throw e;
+    }
+
+    if (loan.disbursed_at) {
+      const e = new Error('No se puede modificar la cuenta después del desembolso.');
+      e.status = 409;
+      throw e;
+    }
+
+    const upsertR = await client.query(
+      `
+      INSERT INTO loan_disbursement_accounts (
+        loan_id,
+        user_id,
+        bank_name,
+        account_type,
+        account_number,
+        account_holder_name,
+        account_holder_document,
+        is_verified,
+        created_at,
+        updated_at
+      )
+      VALUES ($1,$2,$3,$4,$5,$6,$7,FALSE,NOW(),NOW())
+      ON CONFLICT (loan_id)
+      DO UPDATE SET
+        bank_name = EXCLUDED.bank_name,
+        account_type = EXCLUDED.account_type,
+        account_number = EXCLUDED.account_number,
+        account_holder_name = EXCLUDED.account_holder_name,
+        account_holder_document = EXCLUDED.account_holder_document,
+        is_verified = FALSE,
+        updated_at = NOW()
+      RETURNING *
+      `,
+      [
+        id,
+        userId,
+        data.bank_name,
+        data.account_type,
+        data.account_number,
+        data.account_holder_name,
+        data.account_holder_document
+      ]
+    );
+
+    await writeAuditLog({
+      actorUserId: userId,
+      action: 'DISBURSEMENT_ACCOUNT_UPSERTED',
+      entityType: 'loan_disbursement_account',
+      entityId: upsertR.rows[0].id,
+      before: null,
+      after: {
+        loan_id: id,
+        bank_name: data.bank_name,
+        account_type: data.account_type
+      },
+      ip: req.ip,
+      userAgent: req.headers['user-agent'] || null,
+    });
+
+    await client.query('COMMIT');
+
+    res.json({ ok: true, account: upsertR.rows[0] });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    if (err?.name === 'ZodError') {
+      err.status = 400;
+      err.code = 'VALIDATION_ERROR';
+      err.message = 'Datos inválidos.';
+      err.details = err.issues;
+    }
+    next(err);
+  } finally {
+    client.release();
   }
 });
 
