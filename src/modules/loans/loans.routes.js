@@ -355,31 +355,52 @@ router.get('/my', requireAuth, async (req, res, next) => {
   }
 });
 
-// --- GET /loans/:id (solo dueño)
+// --- GET /loans/:id (detalle completo - solo dueño)
 router.get('/:id', requireAuth, async (req, res, next) => {
   try {
     const { id: loanId } = req.params;
+    const userId = req.user.id;
 
+    // ==========================
+    // 1. Loan base
+    // ==========================
     const loanR = await pool.query(
-      `SELECT * FROM loans WHERE id = $1`,
+      `
+      SELECT *
+      FROM loans
+      WHERE id = $1
+      `,
       [loanId]
     );
+
     const loan = loanR.rows[0];
 
     if (!loan) {
       const e = new Error('Préstamo no encontrado.');
-      e.status = 404; e.code = 'NOT_FOUND';
-      throw e;
-    }
-    if (loan.user_id !== req.user.id) {
-      const e = new Error('No autorizado.');
-      e.status = 403; e.code = 'FORBIDDEN';
+      e.status = 404;
+      e.code = 'NOT_FOUND';
       throw e;
     }
 
+    if (loan.user_id !== userId) {
+      const e = new Error('No autorizado.');
+      e.status = 403;
+      e.code = 'FORBIDDEN';
+      throw e;
+    }
+
+    // ==========================
+    // 2. Installments
+    // ==========================
     const instR = await pool.query(
       `
-      SELECT id, installment_number, due_date, amount_due_cop, amount_paid_cop, status
+      SELECT
+        id,
+        installment_number,
+        due_date,
+        amount_due_cop,
+        amount_paid_cop,
+        status
       FROM loan_installments
       WHERE loan_id = $1
       ORDER BY installment_number ASC
@@ -387,7 +408,95 @@ router.get('/:id', requireAuth, async (req, res, next) => {
       [loanId]
     );
 
-    res.json({ ok: true, loan, installments: instR.rows });
+    // ==========================
+    // 3. Disbursement account
+    // ==========================
+    const accR = await pool.query(
+      `
+      SELECT
+        id,
+        account_holder_name,
+        account_holder_document,
+        bank_name,
+        account_type,
+        account_number,
+        is_verified,
+        created_at,
+        updated_at
+      FROM loan_disbursement_accounts
+      WHERE loan_id = $1
+      LIMIT 1
+      `,
+      [loanId]
+    );
+
+    const disbursementAccount = accR.rows[0] || null;
+
+    // ==========================
+    // 4. Payments
+    // ==========================
+    const payR = await pool.query(
+      `
+      SELECT
+        id,
+        installment_id,
+        amount_cop,
+        status,
+        proof_url,
+        created_at
+      FROM loan_payments
+      WHERE loan_id = $1
+      ORDER BY created_at DESC
+      `,
+      [loanId]
+    );
+
+    const payments = payR.rows;
+
+    // ==========================
+    // 5. Derived financial summary
+    // ==========================
+    const totalPaid = instR.rows.reduce(
+      (sum, i) => sum + Number(i.amount_paid_cop || 0),
+      0
+    );
+
+    const totalDue = Number(loan.total_payable_cop || 0);
+    const remainingBalance = Math.max(totalDue - totalPaid, 0);
+
+    const allInstallmentsPaid =
+      instR.rows.length > 0 &&
+      instR.rows.every(i => i.status === 'PAID');
+
+    // ==========================
+    // 6. Permissions (NO lógica en frontend)
+    // ==========================
+    const permissions = {
+      can_register_payment: loan.status === 'DISBURSED',
+      can_edit_disbursement_account:
+        loan.status === 'APPROVED' && !loan.disbursed_at,
+      can_view_installments:
+        loan.status === 'DISBURSED' || instR.rows.length > 0,
+    };
+
+    // ==========================
+    // 7. Respuesta consolidada
+    // ==========================
+    res.json({
+      ok: true,
+      loan,
+      financial_summary: {
+        total_payable_cop: totalDue,
+        total_paid_cop: totalPaid,
+        remaining_balance_cop: remainingBalance,
+        all_installments_paid: allInstallmentsPaid,
+      },
+      installments: instR.rows,
+      disbursement_account: disbursementAccount,
+      payments,
+      permissions,
+    });
+
   } catch (err) {
     next(err);
   }

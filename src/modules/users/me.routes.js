@@ -100,7 +100,7 @@ router.get('/me/credit-profile', requireAuth, async (req, res, next) => {
 /**
  * GET /me/disbursement-account
  * Devuelve la cuenta bancaria asociada al préstamo activo
- */
+ 
 router.get('/me/disbursement-account', requireAuth, async (req, res, next) => {
   try {
     const userId = req.user.id;
@@ -150,12 +150,12 @@ router.get('/me/disbursement-account', requireAuth, async (req, res, next) => {
     next(err);
   }
 });
-
+*/
 
 /**
  * POST /me/disbursement-account
  * Crea o actualiza la cuenta bancaria para el préstamo aprobado
- */
+ 
 router.post('/me/disbursement-account', requireAuth, async (req, res, next) => {
   try {
     const userId = req.user.id;
@@ -363,7 +363,7 @@ router.post('/me/disbursement-account', requireAuth, async (req, res, next) => {
     next(err);
   }
 });
-
+*/
 
 
 
