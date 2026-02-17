@@ -79,10 +79,16 @@ router.patch(
     try {
       await client.query('BEGIN');
 
-      // 1️⃣ Lock del préstamo (entidad principal)
+      // 1️⃣ Lock del préstamo
       const loanR = await client.query(
         `
-        SELECT id, status, disbursed_at, principal_cop
+        SELECT 
+          id,
+          status,
+          disbursed_at,
+          principal_cop,
+          term_months,
+          installment_amount_cop
         FROM loans
         WHERE id = $1
         FOR UPDATE
@@ -121,7 +127,7 @@ router.patch(
         SELECT id
         FROM loan_disbursement_accounts
         WHERE loan_id = $1
-        AND is_verified = TRUE
+          AND is_verified = TRUE
         FOR UPDATE
         `,
         [id]
@@ -136,7 +142,27 @@ router.patch(
         throw e;
       }
 
-      // 4️⃣ Actualizar préstamo
+      // 4️⃣ Seguridad extra: evitar doble generación de cuotas
+      const existingInstallments = await client.query(
+        `
+        SELECT 1
+        FROM loan_installments
+        WHERE loan_id = $1
+        LIMIT 1
+        `,
+        [id]
+      );
+
+      if (existingInstallments.rowCount > 0) {
+        const e = new Error(
+          'El cronograma ya existe para este préstamo.'
+        );
+        e.status = 409;
+        e.code = 'INSTALLMENTS_ALREADY_EXIST';
+        throw e;
+      }
+
+      // 5️⃣ Actualizar préstamo a DISBURSED
       await client.query(
         `
         UPDATE loans
@@ -149,7 +175,46 @@ router.patch(
         [id]
       );
 
-      // 5️⃣ Registrar transacción contable
+      const disbursementDate = new Date();
+
+      // 6️⃣ Generar cuotas
+      for (let i = 1; i <= loan.term_months; i++) {
+        const dueDate = new Date(disbursementDate);
+        dueDate.setMonth(dueDate.getMonth() + i);
+
+        await client.query(
+          `
+          INSERT INTO loan_installments (
+            loan_id,
+            installment_number,
+            amount_due_cop,
+            amount_paid_cop,
+            due_date,
+            status,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            $1,
+            $2,
+            $3,
+            0,
+            $4,
+            'PENDING',
+            NOW(),
+            NOW()
+          )
+          `,
+          [
+            loan.id,
+            i,
+            loan.installment_amount_cop,
+            dueDate
+          ]
+        );
+      }
+
+      // 7️⃣ Registrar transacción contable
       await client.query(
         `
         INSERT INTO loan_transactions (
@@ -479,129 +544,6 @@ router.patch('/loan-payments/:id/review', requireAuth, requireRole('ADMIN', 'OPE
       `,
       [loanId]
     );
-
-    // if (check.rows[0].total > 0 && check.rows[0].paid === check.rows[0].total) {
-    //   await pool.query(
-    //     `
-    //     UPDATE loans
-    //     SET status = 'CLOSED',
-    //         closed_at = NOW(),
-    //         updated_at = NOW()
-    //     WHERE id = $1
-    //     `,
-    //     [loanId]
-    //   );
-    // }
-
-    // if (check.rows[0].total > 0 && check.rows[0].paid === check.rows[0].total) {
-    //   // 1) Cerrar el préstamo
-    //   await pool.query(
-    //     `
-    //     UPDATE loans
-    //     SET status = 'CLOSED',
-    //         closed_at = NOW(),
-    //         updated_at = NOW()
-    //     WHERE id = $1
-    //     `,
-    //     [loanId]
-    //   );
-// 
-    //   // 2) Obtener datos del préstamo cerrado
-    //   const loanR = await pool.query(
-    //     `
-    //     SELECT user_id, term_months
-    //     FROM loans
-    //     WHERE id = $1
-    //     `,
-    //     [loanId]
-    //   );
-// 
-    //   const { user_id, term_months } = loanR.rows[0];
-// 
-    //   // 3) Bloquear y leer credit_profile
-    //   const cpR = await pool.query(
-    //     `
-    //     SELECT current_limit_cop, max_limit_cop, loans_repaid
-    //     FROM credit_profiles
-    //     WHERE user_id = $1
-    //     FOR UPDATE
-    //     `,
-    //     [user_id]
-    //   );
-// 
-    //   const cp = cpR.rows[0];
-// 
-    //   const lateStatsR = await pool.query(
-    //   `
-    //   SELECT
-    //     COALESCE(SUM(COALESCE(days_late, 0)), 0)::int AS total_days_late,
-    //     COALESCE(SUM(CASE WHEN COALESCE(days_late, 0) > 0 THEN 1 ELSE 0 END), 0)::int AS late_installments
-    //   FROM loan_installments
-    //   WHERE loan_id = $1::uuid::uuid
-    //   `,
-    //   [loanId]
-    // );
-// 
-    // const { total_days_late, late_installments } = lateStatsR.rows[0];
-// 
-    //   if (cp) {
-    //   const current = Number(cp.current_limit_cop);
-    //   const max = Number(cp.max_limit_cop);
-    //   const repaid = Number(cp.loans_repaid);
-// 
-    //   const isOnTimeLoan = Number(late_installments) === 0;
-// 
-    //   let newLimit = current;
-// 
-    //   if (isOnTimeLoan) {
-    //     // Premio: tu regla actual
-    //     if (current <= 100000) {
-    //       newLimit = 200000;
-    //     } else if (current <= 200000 && (repaid + 1) >= 2) {
-    //       newLimit = 500000;
-    //     }
-    //     if (newLimit > max) newLimit = max;
-// 
-    //     await pool.query(
-    //       `
-    //       UPDATE credit_profiles
-    //       SET loans_repaid = loans_repaid + 1,
-    //           on_time_payments = on_time_payments + $2,
-    //           current_limit_cop = $3,
-    //           last_repaid_at = NOW(),
-    //           updated_at = NOW()
-    //       WHERE user_id = $1
-    //       `,
-    //       [user_id, term_months, newLimit]
-    //     );
-    //   } else {
-    //     // Mora: no subir cupo, acumular métricas a nivel préstamo
-    //     await pool.query(
-    //       `
-    //       UPDATE credit_profiles
-    //       SET loans_repaid = loans_repaid + 1,
-    //           late_payments = late_payments + $2,
-    //           days_past_due_total = days_past_due_total + $3,
-    //           last_repaid_at = NOW(),
-    //           updated_at = NOW()
-    //       WHERE user_id = $1
-    //       `,
-    //       [user_id, Number(late_installments), Number(total_days_late)]
-    //     );
-    //   }
-    // }
-// 
-    // }
-
-    
-
-    // const tierUp = (current) => {
-    //   if (current <= 100000) return 200000;
-    //   if (current <= 200000) return 500000;
-    //   if (current <= 500000) return 1000000;
-    //   return current;
-    // };
-// 
     
 
     if (check.rows[0].total > 0 && check.rows[0].paid === check.rows[0].total) {

@@ -21,7 +21,8 @@ router.post('/apply', requireAuth, async (req, res, next) => {
     // 1) Cargar estado del usuario + perfil de crédito
     const u = await pool.query(
       `
-      SELECT u.id, u.kyc_status, cp.current_limit_cop, cp.max_limit_cop, cp.risk_tier, cp.is_suspended, cp.suspension_reason
+      SELECT u.id, u.kyc_status, cp.current_limit_cop, cp.max_limit_cop,
+             cp.risk_tier, cp.is_suspended, cp.suspension_reason
       FROM users u
       JOIN credit_profiles cp ON cp.user_id = u.id
       WHERE u.id = $1 AND u.deleted_at IS NULL
@@ -32,49 +33,55 @@ router.post('/apply', requireAuth, async (req, res, next) => {
     const row = u.rows[0];
     if (!row) {
       const e = new Error('Usuario no encontrado.');
-      e.status = 404; e.code = 'NOT_FOUND';
+      e.status = 404; 
+      e.code = 'NOT_FOUND';
       throw e;
     }
 
     // 2) Reglas de elegibilidad
     if (row.is_suspended) {
       const e = new Error(row.suspension_reason || 'Cuenta suspendida.');
-      e.status = 403; e.code = 'SUSPENDED';
+      e.status = 403; 
+      e.code = 'SUSPENDED';
       throw e;
     }
 
     if (row.kyc_status !== 'APPROVED') {
       const e = new Error('KYC no aprobado.');
-      e.status = 403; e.code = 'KYC_NOT_APPROVED';
+      e.status = 403; 
+      e.code = 'KYC_NOT_APPROVED';
       throw e;
     }
 
-    // Riesgo vs plazo
     if (row.risk_tier === 'MEDIUM' && data.term_months === 3) {
       const e = new Error('Tu perfil solo permite plazo de 2 meses.');
-      e.status = 400; e.code = 'TERM_NOT_ALLOWED';
-      throw e;
-    }
-    if (row.risk_tier === 'HIGH') {
-      const e = new Error('Tu perfil requiere revisión para solicitar préstamo.');
-      e.status = 403; e.code = 'RISK_REVIEW_REQUIRED';
+      e.status = 400; 
+      e.code = 'TERM_NOT_ALLOWED';
       throw e;
     }
 
-    // Monto vs límite
+    if (row.risk_tier === 'HIGH') {
+      const e = new Error('Tu perfil requiere revisión para solicitar préstamo.');
+      e.status = 403; 
+      e.code = 'RISK_REVIEW_REQUIRED';
+      throw e;
+    }
+
     const limit = Number(row.current_limit_cop);
     if (data.principal_cop > limit) {
       const e = new Error(`Monto excede tu cupo actual (${limit}).`);
-      e.status = 400; e.code = 'LIMIT_EXCEEDED';
+      e.status = 400; 
+      e.code = 'LIMIT_EXCEEDED';
       throw e;
     }
 
-    // 3) Regla: 1 préstamo activo por usuario
+    // 3) Regla: 1 préstamo activo
     const active = await pool.query(
       `
-      SELECT id, status
+      SELECT id
       FROM loans
-      WHERE user_id = $1 AND status IN ('PENDING','APPROVED','DISBURSED')
+      WHERE user_id = $1
+        AND status IN ('PENDING','APPROVED','DISBURSED')
       LIMIT 1
       `,
       [req.user.id]
@@ -82,51 +89,50 @@ router.post('/apply', requireAuth, async (req, res, next) => {
 
     if (active.rows[0]) {
       const e = new Error('Ya tienes un préstamo en curso.');
-      e.status = 409; e.code = 'ACTIVE_LOAN_EXISTS';
+      e.status = 409; 
+      e.code = 'ACTIVE_LOAN_EXISTS';
       throw e;
     }
 
-    // 4) Calcular tasa mensual y cuota
+    // 4) Calcular tasa y cuota
     const monthlyRate = eaToEm(PRODUCT_EA);
-    const installment = fixedInstallment(data.principal_cop, monthlyRate, data.term_months);
+    const installment = fixedInstallment(
+      data.principal_cop,
+      monthlyRate,
+      data.term_months
+    );
     const total = totalPayable(installment, data.term_months);
 
-    // 5) Crear préstamo + cuotas en transacción
+    // 5) Crear préstamo (SIN cuotas)
     await pool.query('BEGIN');
 
     const loanIns = await pool.query(
       `
       INSERT INTO loans (
-        user_id, principal_cop, term_months,
-        interest_ea_used, monthly_rate_em,
-        installment_amount_cop, total_payable_cop,
+        user_id,
+        principal_cop,
+        term_months,
+        interest_ea_used,
+        monthly_rate_em,
+        installment_amount_cop,
+        total_payable_cop,
         status
       )
       VALUES ($1,$2,$3,$4,$5,$6,$7,'PENDING')
       RETURNING *
       `,
-      [req.user.id, data.principal_cop, data.term_months, PRODUCT_EA, monthlyRate, installment, total]
+      [
+        req.user.id,
+        data.principal_cop,
+        data.term_months,
+        PRODUCT_EA,
+        monthlyRate,
+        installment,
+        total
+      ]
     );
 
     const loan = loanIns.rows[0];
-
-    // Generar cuotas: 1ra cuota = +30 días (MVP simple). Luego afinamos por calendario real.
-    const today = new Date();
-    for (let k = 1; k <= data.term_months; k++) {
-      const due = new Date(today);
-      due.setDate(due.getDate() + (30 * k));
-
-      // YYYY-MM-DD
-      const dueDate = due.toISOString().slice(0, 10);
-
-      await pool.query(
-        `
-        INSERT INTO loan_installments (loan_id, installment_number, due_date, amount_due_cop)
-        VALUES ($1, $2, $3, $4)
-        `,
-        [loan.id, k, dueDate, installment]
-      );
-    }
 
     await writeAuditLog({
       actorUserId: req.user.id,
@@ -148,24 +154,15 @@ router.post('/apply', requireAuth, async (req, res, next) => {
 
     await pool.query('COMMIT');
 
-    // 6) Respuesta: incluye cuotas
-    const installments = await pool.query(
-      `
-      SELECT id, installment_number, due_date, amount_due_cop, amount_paid_cop, status
-      FROM loan_installments
-      WHERE loan_id = $1
-      ORDER BY installment_number ASC
-      `,
-      [loan.id]
-    );
-
+    // 6) Respuesta limpia (sin cuotas)
     res.status(201).json({
       ok: true,
-      loan,
-      installments: installments.rows
+      loan
     });
+
   } catch (err) {
     try { await pool.query('ROLLBACK'); } catch (_) {}
+
     if (err?.name === 'ZodError') {
       err.status = 400;
       err.code = 'VALIDATION_ERROR';
@@ -173,9 +170,11 @@ router.post('/apply', requireAuth, async (req, res, next) => {
       err.details = err.issues;
       return next(err);
     }
+
     next(err);
   }
 });
+
 
 const { upload } = require('./payments.upload');
 
