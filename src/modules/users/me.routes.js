@@ -159,7 +159,8 @@ router.get('/me/disbursement-account', requireAuth, async (req, res, next) => {
 router.post('/me/disbursement-account', requireAuth, async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const {
+
+    let {
       account_holder_name,
       account_holder_document,
       bank_name,
@@ -167,12 +168,22 @@ router.post('/me/disbursement-account', requireAuth, async (req, res, next) => {
       account_number
     } = req.body;
 
-    // Validación básica
+    // ==========================
+    // Normalización
+    // ==========================
+    account_holder_name = String(account_holder_name || '').trim().toUpperCase();
+    account_holder_document = String(account_holder_document || '').trim();
+    bank_name = String(bank_name || '').trim().toUpperCase();
+    account_type = String(account_type || '').trim().toUpperCase();
+    account_number = String(account_number || '').trim();
+
+    // ==========================
+    // Validación básica presencia
+    // ==========================
     if (
       !account_holder_name ||
       !account_holder_document ||
       !bank_name ||
-      !account_type ||
       !account_number
     ) {
       const e = new Error('Datos incompletos.');
@@ -180,7 +191,79 @@ router.post('/me/disbursement-account', requireAuth, async (req, res, next) => {
       throw e;
     }
 
+    // ==========================
+    // Validación nombre
+    // ==========================
+    if (account_holder_name.length < 5) {
+      const e = new Error('Nombre del titular inválido.');
+      e.status = 400;
+      throw e;
+    }
+
+    // ==========================
+    // Validación documento
+    // ==========================
+    if (!/^[0-9]{5,15}$/.test(account_holder_document)) {
+      const e = new Error('Documento inválido.');
+      e.status = 400;
+      throw e;
+    }
+
+    // ==========================
+    // Validación número solo dígitos
+    // ==========================
+    if (!/^[0-9]+$/.test(account_number)) {
+      const e = new Error('El número debe contener solo dígitos.');
+      e.status = 400;
+      throw e;
+    }
+
+    // ==========================
+    // Validación según entidad
+    // ==========================
+    const isWallet =
+      bank_name === 'NEQUI' ||
+      bank_name === 'DAVIPLATA';
+
+    if (isWallet) {
+      // Debe ser celular colombiano 10 dígitos iniciando en 3
+      if (!/^[3][0-9]{9}$/.test(account_number)) {
+        const e = new Error(
+          'Nequi/Daviplata debe ser un celular válido de 10 dígitos que inicie en 3.'
+        );
+        e.status = 400;
+        throw e;
+      }
+
+      // Forzamos tipo consistente para billeteras
+      account_type = 'WALLET';
+
+    } else {
+      // Cuenta bancaria tradicional
+      if (!/^[0-9]{6,20}$/.test(account_number)) {
+        const e = new Error(
+          'La cuenta bancaria debe tener entre 6 y 20 dígitos.'
+        );
+        e.status = 400;
+        throw e;
+      }
+
+      if (!account_type) {
+        const e = new Error('Tipo de cuenta requerido.');
+        e.status = 400;
+        throw e;
+      }
+
+      if (!['SAVINGS', 'CHECKING'].includes(account_type)) {
+        const e = new Error('Tipo de cuenta inválido.');
+        e.status = 400;
+        throw e;
+      }
+    }
+
+    // ==========================
     // Debe tener préstamo APPROVED
+    // ==========================
     const loanR = await pool.query(
       `
       SELECT id, status
@@ -201,7 +284,9 @@ router.post('/me/disbursement-account', requireAuth, async (req, res, next) => {
       throw e;
     }
 
+    // ==========================
     // Verificar si ya existe cuenta
+    // ==========================
     const existingR = await pool.query(
       `
       SELECT id, is_verified
@@ -215,7 +300,9 @@ router.post('/me/disbursement-account', requireAuth, async (req, res, next) => {
       const existing = existingR.rows[0];
 
       if (existing.is_verified) {
-        const e = new Error('La cuenta ya fue verificada y no puede modificarse.');
+        const e = new Error(
+          'La cuenta ya fue verificada y no puede modificarse.'
+        );
         e.status = 400;
         throw e;
       }
@@ -276,6 +363,7 @@ router.post('/me/disbursement-account', requireAuth, async (req, res, next) => {
     next(err);
   }
 });
+
 
 
 
