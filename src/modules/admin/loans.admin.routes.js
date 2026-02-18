@@ -142,7 +142,7 @@ router.patch(
         throw e;
       }
 
-      // 4️⃣ Seguridad extra: evitar doble generación de cuotas
+      // 4️⃣ Evitar doble generación de cuotas
       const existingInstallments = await client.query(
         `
         SELECT 1
@@ -162,7 +162,7 @@ router.patch(
         throw e;
       }
 
-      // 5️⃣ Actualizar préstamo a DISBURSED
+      // 5️⃣ Actualizar préstamo
       await client.query(
         `
         UPDATE loans
@@ -214,17 +214,34 @@ router.patch(
         );
       }
 
-      // 7️⃣ Registrar transacción contable
+      // 7️⃣ Registrar transacción contable (tabla correcta)
       await client.query(
         `
-        INSERT INTO loan_transactions (
+        INSERT INTO transactions (
           loan_id,
           type,
-          amount_cop
+          amount_cop,
+          reference,
+          proof_url,
+          created_by,
+          created_at
         )
-        VALUES ($1, 'DISBURSEMENT', $2)
+        VALUES (
+          $1,
+          'DISBURSEMENT',
+          $2,
+          $3,
+          NULL,
+          $4,
+          NOW()
+        )
         `,
-        [loan.id, loan.principal_cop]
+        [
+          loan.id,
+          loan.principal_cop,
+          `DISB-${loan.id}`,
+          req.user.id
+        ]
       );
 
       await client.query('COMMIT');
@@ -243,7 +260,6 @@ router.patch(
     }
   }
 );
-
 
 
 router.get('/loan-payments', requireAuth, requireRole('ADMIN', 'OPERATOR'), async (req, res, next) => {
