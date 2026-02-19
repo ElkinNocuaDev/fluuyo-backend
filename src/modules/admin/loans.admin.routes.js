@@ -829,7 +829,7 @@ router.get(
 
       const disbursementAccount = accountR.rows[0] || null;
 
-      // 3️⃣ Cuotas (ajustado para derivar UNDER_REVIEW)
+      // 3️⃣ Cuotas (compatible + estado derivable correcto)
       const installmentsR = await pool.query(
         `
         SELECT
@@ -837,24 +837,42 @@ router.get(
           li.amount_due_cop AS amount_cop,
           li.amount_paid_cop,
           li.due_date,
+      
+          -- Estado contable real
+          li.status AS base_status,
+      
+          -- Último estado de pago asociado a esta cuota
+          (
+            SELECT lp.status
+            FROM loan_payments lp
+            WHERE lp.installment_id = li.id
+            ORDER BY lp.created_at DESC
+            LIMIT 1
+          ) AS latest_payment_status,
+      
+          -- 🔒 Mantener compatibilidad con producción
           CASE
-            WHEN EXISTS (
-              SELECT 1
+            WHEN (
+              SELECT lp.status
               FROM loan_payments lp
               WHERE lp.installment_id = li.id
-                AND lp.status = 'SUBMITTED'
-            )
+              ORDER BY lp.created_at DESC
+              LIMIT 1
+            ) = 'SUBMITTED'
             THEN 'UNDER_REVIEW'
             ELSE li.status
           END AS status,
+      
           li.paid_at,
           li.days_late
+      
         FROM loan_installments li
         WHERE li.loan_id = $1
         ORDER BY li.installment_number ASC
         `,
         [id]
       );
+
 
       // 4️⃣ Pagos
       const paymentsR = await pool.query(
