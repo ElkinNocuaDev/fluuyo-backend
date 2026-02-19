@@ -837,36 +837,30 @@ router.get(
           li.amount_due_cop AS amount_cop,
           li.amount_paid_cop,
           li.due_date,
-      
-          -- Estado contable real
+              
           li.status AS base_status,
-      
-          -- Último estado de pago asociado a esta cuota
-          (
-            SELECT lp.status
-            FROM loan_payments lp
-            WHERE lp.installment_id = li.id
-            ORDER BY lp.created_at DESC
-            LIMIT 1
-          ) AS latest_payment_status,
-      
-          -- 🔒 Mantener compatibilidad con producción
+              
+          latest_lp.status AS latest_payment_status,
+              
           CASE
-            WHEN (
-              SELECT lp.status
-              FROM loan_payments lp
-              WHERE lp.installment_id = li.id
-              ORDER BY lp.created_at DESC
-              LIMIT 1
-            ) = 'SUBMITTED'
-            THEN 'UNDER_REVIEW'
-            ELSE li.status
+            WHEN latest_lp.status = 'SUBMITTED'
+              THEN 'UNDER_REVIEW'::text
+            ELSE li.status::text
           END AS status,
-      
+              
           li.paid_at,
           li.days_late
-      
+              
         FROM loan_installments li
+              
+        LEFT JOIN LATERAL (
+          SELECT lp.status
+          FROM loan_payments lp
+          WHERE lp.installment_id = li.id
+          ORDER BY lp.created_at DESC
+          LIMIT 1
+        ) latest_lp ON TRUE
+              
         WHERE li.loan_id = $1
         ORDER BY li.installment_number ASC
         `,
