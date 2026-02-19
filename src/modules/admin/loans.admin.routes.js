@@ -829,7 +829,7 @@ router.get(
 
       const disbursementAccount = accountR.rows[0] || null;
 
-      // 3️⃣ Cuotas
+      // 3️⃣ Cuotas (ajustado para derivar UNDER_REVIEW)
       const installmentsR = await pool.query(
         `
         SELECT
@@ -837,7 +837,16 @@ router.get(
           li.amount_due_cop AS amount_cop,
           li.amount_paid_cop,
           li.due_date,
-          li.status,
+          CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM loan_payments lp
+              WHERE lp.installment_id = li.id
+                AND lp.status = 'SUBMITTED'
+            )
+            THEN 'UNDER_REVIEW'
+            ELSE li.status
+          END AS status,
           li.paid_at,
           li.days_late
         FROM loan_installments li
@@ -877,6 +886,7 @@ router.get(
     }
   }
 );
+
 
 
 // GET /admin/loans/:id/payments
