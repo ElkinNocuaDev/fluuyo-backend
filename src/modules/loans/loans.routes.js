@@ -629,5 +629,66 @@ router.post('/:id/disbursement-account', requireAuth, async (req, res, next) => 
   }
 });
 
+router.get('/:loanId/payments/:paymentId', requireAuth, async (req, res, next) => {
+  try {
+    const { loanId, paymentId } = req.params;
+    const userId = req.user.id;
+
+    // 1️⃣ Validar que el préstamo exista
+    const loanR = await pool.query(
+      `SELECT * FROM loans WHERE id = $1`,
+      [loanId]
+    );
+
+    if (loanR.rowCount === 0) {
+      const e = new Error('Préstamo no encontrado.');
+      e.status = 404;
+      e.code = 'NOT_FOUND';
+      throw e;
+    }
+
+    const loan = loanR.rows[0];
+
+    // 2️⃣ Validar ownership (solo dueño por ahora)
+    if (loan.user_id !== userId) {
+      const e = new Error('No autorizado.');
+      e.status = 403;
+      e.code = 'FORBIDDEN';
+      throw e;
+    }
+
+    // 3️⃣ Buscar el pago
+    const payR = await pool.query(
+      `
+      SELECT *
+      FROM loan_payments
+      WHERE id = $1 AND loan_id = $2
+      `,
+      [paymentId, loanId]
+    );
+
+    if (payR.rowCount === 0) {
+      const e = new Error('Pago no encontrado.');
+      e.status = 404;
+      e.code = 'NOT_FOUND';
+      throw e;
+    }
+
+    const payment = payR.rows[0];
+
+    // 4️⃣ Respuesta estructurada como espera el frontend
+    res.json({
+      ok: true,
+      payment,
+      loan,
+      permissions: {
+        can_view_proof: true,
+      },
+    });
+
+  } catch (err) {
+    next(err);
+  }
+});
 
 module.exports = router;
