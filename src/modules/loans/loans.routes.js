@@ -216,7 +216,7 @@ router.post('/:id/payments', requireAuth, upload.single('file'), async (req, res
       throw e;
     }
 
-    const proofUrl = `/uploads/payments/${loanId}/${req.file.filename}`;
+    const proofUrl = `/uploads/${loanId}/${req.file.filename}`;
 
     // Si envía installment_id, validarlo que pertenezca al loan
     let installmentId = data.installment_id || null;
